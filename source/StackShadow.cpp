@@ -224,21 +224,44 @@ static void applyStackBlur (juce::Image& img, unsigned int radius)
 }
 
 //=================================================================================
+/** Implementation utility function to create an AffineTransform which correctly
+ *  accounts for the offset and spread properties of a shadow.
+ */
+juce::AffineTransform getSpreadTransform (const juce::Path& path, const juce::Point<int> offset, int spread)
+{
+    juce::AffineTransform base { juce::AffineTransform::translation (offset) };
 
+    if (spread != 0)
+    {
+        spread *= 2;
+
+        const auto offsetPoint = offset.toFloat();
+        const auto pathBounds = path.getBounds().translated (offsetPoint.x, offsetPoint.y);
+        const auto pivotPoint = pathBounds.getCentre();
+        const auto scaleX = (pathBounds.getWidth() - spread) / pathBounds.getWidth();
+        const auto scaleY = (pathBounds.getHeight() - spread) / pathBounds.getHeight();
+
+        return base.followedBy (juce::AffineTransform::scale (scaleX, scaleY, pivotPoint.x, pivotPoint.y));
+    }
+
+    return base;
+}
+
+//=================================================================================
 StackShadow::StackShadow (juce::Colour shadowColour, juce::Point<int> o, const int b, const int s) noexcept
     : colour (shadowColour), offset (o), blur (b), spread (s)
 {
     jassert (blur > 0);
 }
 
-void StackShadow::drawOuterShadowForPath (juce::Graphics& g, const juce::Path& path) const
+StackShadow::Cache StackShadow::createOuterShadowForPath (juce::Rectangle<int> bounds, const juce::Path& path) const
 {
     jassert (blur > 0);
 
     const auto pathArea = path.getBounds().getSmallestIntegerContainer();
     auto area = (pathArea + offset)
                   .expanded (blur + 1)
-                  .getIntersection (g.getClipBounds().expanded (blur + 1));
+                  .getIntersection (bounds.expanded (blur + 1));
 
     if (area.getWidth() > 2 && area.getHeight() > 2)
     {
@@ -259,36 +282,42 @@ void StackShadow::drawOuterShadowForPath (juce::Graphics& g, const juce::Path& p
 
         applyStackBlur (renderedPath, blur);
 
-        juce::Image renderedPathTwo (juce::Image::ARGB, area.getWidth(), area.getHeight(), true);
+        StackShadow::Cache cache { { juce::Image::ARGB, area.getWidth(), area.getHeight(), true }, area.getTopLeft() };
         {
-            juce::Graphics g2 (renderedPathTwo);
+            juce::Graphics g2 (cache.image);
             g2.setColour (colour);
             
             g2.drawImageAt (renderedPath, 0, 0, true);
         }
 
-        g.drawImageAt (renderedPathTwo, area.getX(), area.getY());
+        return cache;
     }
+
+    return {};
 }
 
-juce::AffineTransform getSpreadTransform (const juce::Path& path, const juce::Point<int> offset, int spread)
+StackShadow::Cache StackShadow::createInnerShadowForPath (juce::Rectangle<int> bounds, const juce::Path& path) const
 {
-    juce::AffineTransform base { juce::AffineTransform::translation (offset) };
+    // This feels really wrong, but it's the only way I can think to continue
+    // using juce::Graphics::reduceClipRegion in drawInnerShadowForPath to
+    // make inner shadows draw correctly.
+    // The intended usage of this function to only regenerate static shadows
+    // means this function shouldn't be called very often, so perhaps we're
+    // OK with this counterintuitive implementation and the slight performance
+    // degradation when compared to createOuterShadowForPath.
+    StackShadow::Cache cache { { juce::Image::ARGB, bounds.getWidth(), bounds.getHeight(), true }, {} };
 
-    if (spread != 0)
     {
-        spread *= 2;
-
-        const auto offsetPoint = offset.toFloat();
-        const auto pathBounds = path.getBounds().translated (offsetPoint.x, offsetPoint.y);
-        const auto pivotPoint = pathBounds.getCentre();
-        const auto scaleX = (pathBounds.getWidth() - spread) / pathBounds.getWidth();
-        const auto scaleY = (pathBounds.getHeight() - spread) / pathBounds.getHeight();
-
-        return base.followedBy (juce::AffineTransform::scale (scaleX, scaleY, pivotPoint.x, pivotPoint.y));
+        juce::Graphics g { cache.image };
+        drawInnerShadowForPath (g, path);
     }
 
-    return base;
+    return cache;
+}
+
+void StackShadow::drawOuterShadowForPath (juce::Graphics& g, const juce::Path& path) const
+{
+    createOuterShadowForPath (g.getClipBounds(), path).paint (g);
 }
 
 void StackShadow::drawInnerShadowForPath (juce::Graphics& g, const juce::Path& path) const
